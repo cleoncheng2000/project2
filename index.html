@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transit & Air Planner</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Transit &amp; Air Planner</h1>
+    <p class="sub">Public transport routes, live air quality, and whether to mask up for the walk.</p>
+  </header>
+
+  <main>
+    <form id="plan-form" autocomplete="off">
+      <div class="field">
+        <label for="from">Start</label>
+        <div class="input-wrap">
+          <input id="from" type="text" placeholder="e.g. Marina Bay Sands" required>
+          <button type="button" id="locate" class="ghost" title="Use my current location">📍</button>
+          <ul class="suggest" id="from-suggest" hidden></ul>
+        </div>
+      </div>
+      <div class="field">
+        <label for="to">Destination</label>
+        <div class="input-wrap">
+          <input id="to" type="text" placeholder="e.g. Changi Airport" required>
+          <ul class="suggest" id="to-suggest" hidden></ul>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="when">Depart at <span class="hint">(blank = now)</span></label>
+          <input id="when" type="datetime-local">
+        </div>
+        <label class="check">
+          <input id="sensitive" type="checkbox">
+          I'm in a sensitive group (asthma, heart/lung condition, elderly, pregnant, child)
+        </label>
+      </div>
+      <button type="submit" id="go">Plan trip</button>
+    </form>
+
+    <p id="status" role="status"></p>
+
+    <section id="results" hidden>
+      <div class="grid">
+        <div class="card" id="air"></div>
+        <div class="card" id="mask"></div>
+      </div>
+      <div id="map"></div>
+      <h2>Routes</h2>
+      <ol id="itineraries"></ol>
+    </section>
+  </main>
+
+  <footer>
+    Routing &amp; real-time data: <a href="https://transitous.org">Transitous</a> ·
+    Air quality: <a href="https://open-meteo.com/en/docs/air-quality-api">Open-Meteo</a> ·
+    Map: © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
+  </footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
