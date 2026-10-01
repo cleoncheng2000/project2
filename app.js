@@ -1,11 +1,16 @@
 // Free, keyless APIs (both send CORS headers, so this runs as a static site):
 //   Transitous (MOTIS) – geocoding + public transport routing, real-time where agencies publish it
 //   Open-Meteo Air Quality – current US AQI / PM2.5 / PM10
+//   ArriveLah – live LTA bus arrivals for Singapore bus stops
+//   data.gov.sg – official NEA PSI readings by region
 const TRANSIT_API = "https://api.transitous.org/api";
 const AIR_API = "https://air-quality-api.open-meteo.com/v1/air-quality";
+const BUS_ARRIVAL_API = "https://arrivelah2.busrouter.sg/";
+const PSI_API = "https://api.data.gov.sg/v1/environment/psi";
+const SG_CENTER = "1.3521,103.8198"; // biases place search towards Singapore
 
 const $ = (id) => document.getElementById(id);
-const state = { from: null, to: null, itineraries: [], air: null, selected: 0 };
+const state = { from: null, to: null, itineraries: [], air: null, psi: null, busArrivals: {}, selected: 0 };
 
 // ---------- Place search / autocomplete ----------
 
@@ -18,7 +23,7 @@ function debounce(fn, ms) {
 }
 
 async function geocode(text) {
-  const res = await fetch(`${TRANSIT_API}/v1/geocode?text=${encodeURIComponent(text)}`);
+  const res = await fetch(`${TRANSIT_API}/v1/geocode?text=${encodeURIComponent(text)}&place=${SG_CENTER}`);
   if (!res.ok) throw new Error(`Place search failed (${res.status})`);
   return res.json();
 }
@@ -139,6 +144,43 @@ async function airQuality(places) {
   return Array.isArray(data) ? data : [data];
 }
 
+// Official NEA PSI: Singapore is split into 5 regions; use the one nearest each place.
+async function neaPsi(places) {
+  const res = await fetch(PSI_API);
+  if (!res.ok) throw new Error(`PSI lookup failed (${res.status})`);
+  const data = await res.json();
+  const item = data.items?.[0];
+  if (!item) return null;
+  return places.map((p) => {
+    let best, bestDist = Infinity;
+    for (const r of data.region_metadata) {
+      const d = (r.label_location.latitude - p.lat) ** 2 + (r.label_location.longitude - p.lon) ** 2;
+      if (d < bestDist) [best, bestDist] = [r.name, d];
+    }
+    // ~0.3° (~33 km) from the nearest region centre means the place isn't in Singapore
+    if (bestDist > 0.09) return null;
+    return { region: best, psi: item.readings.psi_twenty_four_hourly[best], time: item.update_timestamp };
+  });
+}
+
+// Live LTA bus arrivals for every Singapore bus boarding stop across the itineraries.
+async function loadBusArrivals() {
+  const codes = new Set();
+  for (const it of state.itineraries)
+    for (const l of it.legs)
+      if (l.mode === "BUS" && l.from.stopId?.startsWith("sg-") && l.from.stopCode) codes.add(l.from.stopCode);
+  await Promise.all(
+    [...codes].map(async (code) => {
+      try {
+        const res = await fetch(`${BUS_ARRIVAL_API}?id=${encodeURIComponent(code)}`);
+        if (res.ok) state.busArrivals[code] = { services: (await res.json()).services || [], fetched: Date.now() };
+      } catch {
+        /* live data is a bonus; schedules still show */
+      }
+    })
+  );
+}
+
 // ---------- Air quality & mask advice ----------
 
 const AQI_LEVELS = [
@@ -174,8 +216,10 @@ function renderAir() {
     .map((a, i) => {
       const c = a.current || {};
       const lvl = aqiLevel(c.us_aqi ?? 0);
+      const psi = state.psi?.[i];
+      const psiText = psi ? `<div class="muted">NEA 24-h PSI ${psi.psi} (${psi.region}) · ${psiBand(psi.psi)}</div>` : "";
       return `<div class="aqi-row">
-        <div><strong>${labels[i]}</strong><div class="muted">PM2.5 ${c.pm2_5 ?? "–"} µg/m³ · PM10 ${c.pm10 ?? "–"} µg/m³</div></div>
+        <div><strong>${labels[i]}</strong><div class="muted">PM2.5 ${c.pm2_5 ?? "–"} µg/m³ · PM10 ${c.pm10 ?? "–"} µg/m³</div>${psiText}</div>
         <span class="aqi-badge" style="background:${lvl.color}" title="${lvl.label}">AQI ${c.us_aqi ?? "–"}</span>
       </div>`;
     })
@@ -184,6 +228,9 @@ function renderAir() {
   $("air").innerHTML = `<h3>Air quality (US AQI)</h3>${rows}
     <p class="muted">${aqiLevel(worstAqi() ?? 0).label} · updated ${updated ? updated.replace("T", " ") + " UTC" : "–"}</p>`;
 }
+
+const psiBand = (psi) =>
+  psi <= 50 ? "Good" : psi <= 100 ? "Moderate" : psi <= 200 ? "Unhealthy" : psi <= 300 ? "Very unhealthy" : "Hazardous";
 
 const worstAqi = () => {
   const vals = state.air.map((a) => a.current?.us_aqi).filter((v) => v != null);
@@ -238,9 +285,30 @@ function legDetail(l, tz) {
     ? ` <span class="live">Live</span>${delayMin > 0 ? ` <span class="delay">+${delayMin} min</span>` : ""}`
     : "";
   const stops = l.intermediateStops ? ` · ${l.intermediateStops.length + 1} stops` : "";
+  const bus = liveBusText(l);
   return `${t} · ${MODE_ICON[l.mode] || "🚍"} <strong>${escapeHtml(l.routeShortName || l.displayName || l.mode)}</strong>
     ${l.headsign ? `towards ${escapeHtml(l.headsign)}` : ""} from <strong>${escapeHtml(l.from.name)}</strong>
-    to <strong>${escapeHtml(l.to.name)}</strong> (${fmtDur(l.duration)}${stops})${live}`;
+    to <strong>${escapeHtml(l.to.name)}</strong> (${fmtDur(l.duration)}${stops})${live}${bus}`;
+}
+
+const BUS_LOAD = { SEA: "seats available", SDA: "standing room", LSD: "limited standing" };
+
+function liveBusText(l) {
+  if (l.mode !== "BUS") return "";
+  const stop = state.busArrivals[l.from.stopCode];
+  if (!stop) return "";
+  const svc = stop.services.find((s) => s.no === l.routeShortName);
+  if (!svc) return `<div class="muted">No live arrivals for bus ${escapeHtml(l.routeShortName)} at stop ${escapeHtml(l.from.stopCode)} right now.</div>`;
+  const elapsed = Date.now() - stop.fetched;
+  // ArriveLah's "subsequent" often repeats next2, so dedupe by arrival time.
+  const buses = [svc.next, svc.subsequent, svc.next2, svc.next3]
+    .filter((b) => b?.time)
+    .filter((b, i, arr) => arr.findIndex((x) => x.time === b.time) === i);
+  const parts = buses.slice(0, 3).map((b) => {
+    const min = Math.max(0, Math.round((b.duration_ms - elapsed) / 60000));
+    return `${min === 0 ? "Arr" : `${min} min`}${b.load ? ` (${BUS_LOAD[b.load] || b.load})` : ""}`;
+  });
+  return `<div><span class="live">Live</span> Bus ${escapeHtml(svc.no)} at stop ${escapeHtml(l.from.stopCode)}: ${parts.join(" · ")}</div>`;
 }
 
 function renderItineraries() {
@@ -248,7 +316,7 @@ function renderItineraries() {
   ol.innerHTML = "";
   state.itineraries.forEach((it, i) => {
     const tz = it.legs[0]?.from?.tz || it.legs.find((l) => l.from?.tz)?.from?.tz;
-    const hasLive = it.legs.some((l) => l.realTime);
+    const hasLive = it.legs.some((l) => l.realTime || (l.mode === "BUS" && state.busArrivals[l.from.stopCode]));
     const li = document.createElement("li");
     li.className = "itin" + (i === state.selected ? " selected" : "");
     li.innerHTML = `
@@ -342,12 +410,15 @@ $("plan-form").addEventListener("submit", async (e) => {
   try {
     const [from, to] = await Promise.all([resolvePlace("from"), resolvePlace("to")]);
     setStatus("Planning routes and checking air quality…");
-    const [plan, air] = await Promise.all([
+    const [plan, air, psi] = await Promise.all([
       planTrip(from, to, $("when").value),
       airQuality([from, to]).catch(() => [{}, {}]),
+      neaPsi([from, to]).catch(() => null),
     ]);
     state.itineraries = plan.itineraries || [];
     state.air = air;
+    state.psi = psi;
+    state.busArrivals = {};
     state.selected = 0;
 
     $("results").hidden = false;
@@ -355,6 +426,11 @@ $("plan-form").addEventListener("submit", async (e) => {
     renderItineraries();
     renderMask();
     drawRoute(state.itineraries[0]);
+
+    // Live bus arrivals only make sense for trips leaving now.
+    if (!$("when").value) loadBusArrivals().then(() => {
+      renderItineraries();
+    });
 
     setStatus(
       state.itineraries.length

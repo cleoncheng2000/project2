@@ -7,14 +7,17 @@ A static web app that plans public transport trips between a start and a destina
 ## Features
 - Start / destination search with autocomplete (or 📍 to use your current location)
 - Public transport routes with departure/arrival times, transfers, and walking time
+- Tuned for Singapore: place search is biased to SG, and bus legs show **live LTA bus arrivals** (next 3 buses and how crowded they are)
 - Real-time data (with a **Live** badge and delays) wherever the transit agency publishes it
-- Current US AQI, PM2.5, and PM10 at the start and at the destination
+- Current US AQI, PM2.5, and PM10 at the start and at the destination, plus the official NEA 24-hour PSI for the nearest region
 - Mask advice based on the worse AQI, minutes of walking on the selected route, and whether you're in a sensitive group
 - Route map
 
 ## Data sources (free, no API keys)
 - [Transitous](https://transitous.org): geocoding and transit routing (MOTIS)
 - [Open-Meteo Air Quality API](https://open-meteo.com/en/docs/air-quality-api)
+- [ArriveLah](https://github.com/cheeaun/arrivelah): live LTA bus arrivals
+- [data.gov.sg](https://data.gov.sg) PSI readings (NEA)
 - [OpenStreetMap](https://www.openstreetmap.org) tiles via [Leaflet](https://leafletjs.com)
 
 ## Run locally
