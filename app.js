@@ -2,15 +2,15 @@
 //   Transitous (MOTIS) – geocoding + public transport routing, real-time where agencies publish it
 //   Open-Meteo Air Quality – current US AQI / PM2.5 / PM10
 //   ArriveLah – live LTA bus arrivals for Singapore bus stops
-//   data.gov.sg – official NEA PSI readings by region
+//   data.gov.sg – official NEA 1-hour PM2.5 readings by region
 const TRANSIT_API = "https://api.transitous.org/api";
 const AIR_API = "https://air-quality-api.open-meteo.com/v1/air-quality";
 const BUS_ARRIVAL_API = "https://arrivelah2.busrouter.sg/";
-const PSI_API = "https://api.data.gov.sg/v1/environment/psi";
+const PM25_API = "https://api.data.gov.sg/v1/environment/pm25";
 const SG_CENTER = "1.3521,103.8198"; // biases place search towards Singapore
 
 const $ = (id) => document.getElementById(id);
-const state = { from: null, to: null, itineraries: [], air: null, psi: null, busArrivals: {}, selected: 0 };
+const state = { from: null, to: null, itineraries: [], air: null, pm25: null, busArrivals: {}, selected: 0 };
 
 // ---------- Place search / autocomplete ----------
 
@@ -144,10 +144,10 @@ async function airQuality(places) {
   return Array.isArray(data) ? data : [data];
 }
 
-// Official NEA PSI: Singapore is split into 5 regions; use the one nearest each place.
-async function neaPsi(places) {
-  const res = await fetch(PSI_API);
-  if (!res.ok) throw new Error(`PSI lookup failed (${res.status})`);
+// Official NEA 1-hour PM2.5: Singapore is split into 5 regions; use the one nearest each place.
+async function neaPm25(places) {
+  const res = await fetch(PM25_API);
+  if (!res.ok) throw new Error(`PM2.5 lookup failed (${res.status})`);
   const data = await res.json();
   const item = data.items?.[0];
   if (!item) return null;
@@ -159,7 +159,8 @@ async function neaPsi(places) {
     }
     // ~0.3° (~33 km) from the nearest region centre means the place isn't in Singapore
     if (bestDist > 0.09) return null;
-    return { region: best, psi: item.readings.psi_twenty_four_hourly[best], time: item.update_timestamp };
+    const value = item.readings.pm25_one_hourly?.[best];
+    return value == null ? null : { region: best, value, time: item.timestamp };
   });
 }
 
@@ -183,68 +184,94 @@ async function loadBusArrivals() {
 
 // ---------- Air quality & mask advice ----------
 
+// Both scales map onto shared severity tiers so one mask rule covers them:
+// 0 good · 1 moderate · 2 unhealthy for sensitive groups · 3 unhealthy · 4 very unhealthy/hazardous
 const AQI_LEVELS = [
-  { max: 50, label: "Good", color: "var(--good)" },
-  { max: 100, label: "Moderate", color: "var(--moderate)" },
-  { max: 150, label: "Unhealthy for sensitive groups", color: "var(--usg)" },
-  { max: 200, label: "Unhealthy", color: "var(--unhealthy)" },
-  { max: 300, label: "Very unhealthy", color: "var(--very)" },
-  { max: Infinity, label: "Hazardous", color: "var(--hazard)" },
+  { max: 50, label: "Good", tier: 0, color: "var(--good)" },
+  { max: 100, label: "Moderate", tier: 1, color: "var(--moderate)" },
+  { max: 150, label: "Unhealthy for sensitive groups", tier: 2, color: "var(--usg)" },
+  { max: 200, label: "Unhealthy", tier: 3, color: "var(--unhealthy)" },
+  { max: 300, label: "Very unhealthy", tier: 4, color: "var(--very)" },
+  { max: Infinity, label: "Hazardous", tier: 4, color: "var(--hazard)" },
+];
+// NEA 1-hour PM2.5 bands (µg/m³)
+const PM25_BANDS = [
+  { max: 55, label: "Band I (Normal)", tier: 0, color: "var(--good)" },
+  { max: 150, label: "Band II (Elevated)", tier: 2, color: "var(--usg)" },
+  { max: 250, label: "Band III (High)", tier: 3, color: "var(--unhealthy)" },
+  { max: Infinity, label: "Band IV (Very high)", tier: 4, color: "var(--hazard)" },
 ];
 const aqiLevel = (aqi) => AQI_LEVELS.find((l) => aqi <= l.max);
+const pm25Band = (v) => PM25_BANDS.find((b) => v <= b.max);
 
-function maskAdvice(aqi, walkMin, sensitive) {
-  if (aqi == null) return { verdict: "Unknown", text: "Air quality data unavailable." };
-  if (aqi <= 50)
+// Prefer the official NEA 1-hour PM2.5; fall back to the Open-Meteo US AQI estimate (e.g. outside Singapore).
+function placeAir(i) {
+  const nea = state.pm25?.[i];
+  if (nea) {
+    const band = pm25Band(nea.value);
+    return { ...band, badge: `PM2.5 ${nea.value}`, source: `NEA 1-h PM2.5 (${nea.region})` };
+  }
+  const aqi = state.air?.[i]?.current?.us_aqi;
+  if (aqi == null) return null;
+  return { ...aqiLevel(aqi), badge: `AQI ${aqi}`, source: "US AQI estimate" };
+}
+
+function maskAdvice(tier, walkMin, sensitive) {
+  if (tier == null) return { verdict: "Unknown", text: "Air quality data unavailable." };
+  if (tier === 0)
     return { verdict: "No mask needed", text: "Air quality is good. Enjoy the walk." };
-  if (aqi <= 100)
+  if (tier === 1)
     return sensitive && walkMin >= 15
       ? { verdict: "Optional mask", text: `Moderate air and ~${walkMin} min of walking. As a sensitive person, consider a mask.` }
       : { verdict: "No mask needed", text: "Air quality is acceptable for most people." };
-  if (aqi <= 150)
+  if (tier === 2)
     return sensitive || walkMin >= 20
-      ? { verdict: "Wear a mask", text: `Unhealthy for sensitive groups${walkMin ? ` and ~${walkMin} min of walking` : ""}. An N95/KF94 mask is recommended outdoors.` }
+      ? { verdict: "Wear a mask", text: `Air is unhealthy for sensitive groups${walkMin ? ` and you'll walk ~${walkMin} min` : ""}. An N95/KF94 mask is recommended outdoors.` }
       : { verdict: "Mask recommended if you're sensitive", text: `Short walk (~${walkMin} min) — most people are fine, but a mask is a sensible precaution.` };
-  if (aqi <= 200)
+  if (tier === 3)
     return { verdict: "Wear an N95 mask", text: "Air is unhealthy for everyone. Wear a well-fitted N95/KF94 when walking outside." };
   return { verdict: "Wear an N95 mask & limit walking", text: "Very unhealthy air. Wear an N95, minimise time outdoors, and consider a route with less walking." };
 }
 
 function renderAir() {
   const labels = ["Start", "Destination"];
-  const rows = state.air
-    .map((a, i) => {
-      const c = a.current || {};
-      const lvl = aqiLevel(c.us_aqi ?? 0);
-      const psi = state.psi?.[i];
-      const psiText = psi ? `<div class="muted">NEA 24-h PSI ${psi.psi} (${psi.region}) · ${psiBand(psi.psi)}</div>` : "";
+  const rows = labels
+    .map((label, i) => {
+      const c = state.air?.[i]?.current || {};
+      const lvl = placeAir(i);
+      const badge = lvl
+        ? `<span class="aqi-badge" style="background:${lvl.color}" title="${lvl.label}">${lvl.badge}</span>`
+        : `<span class="muted">No data</span>`;
       return `<div class="aqi-row">
-        <div><strong>${labels[i]}</strong><div class="muted">PM2.5 ${c.pm2_5 ?? "–"} µg/m³ · PM10 ${c.pm10 ?? "–"} µg/m³</div>${psiText}</div>
-        <span class="aqi-badge" style="background:${lvl.color}" title="${lvl.label}">AQI ${c.us_aqi ?? "–"}</span>
+        <div><strong>${label}</strong>
+          <div class="muted">${lvl ? `${lvl.source} · ${lvl.label}` : ""}</div>
+          <div class="muted">Model estimate: US AQI ${c.us_aqi ?? "–"} · PM2.5 ${c.pm2_5 ?? "–"} · PM10 ${c.pm10 ?? "–"} µg/m³</div>
+        </div>
+        ${badge}
       </div>`;
     })
     .join("");
-  const updated = state.air[0]?.current?.time;
-  $("air").innerHTML = `<h3>Air quality (US AQI)</h3>${rows}
-    <p class="muted">${aqiLevel(worstAqi() ?? 0).label} · updated ${updated ? updated.replace("T", " ") + " UTC" : "–"}</p>`;
+  const neaTime = state.pm25?.find(Boolean)?.time;
+  const updated = neaTime
+    ? `NEA reading for ${new Date(neaTime).toLocaleString([], { timeZone: "Asia/Singapore", dateStyle: "medium", timeStyle: "short" })} SGT`
+    : state.air?.[0]?.current?.time ? `estimate for ${state.air[0].current.time.replace("T", " ")} UTC` : "";
+  $("air").innerHTML = `<h3>Air quality</h3>${rows}<p class="muted">${updated}</p>`;
 }
 
-const psiBand = (psi) =>
-  psi <= 50 ? "Good" : psi <= 100 ? "Moderate" : psi <= 200 ? "Unhealthy" : psi <= 300 ? "Very unhealthy" : "Hazardous";
-
-const worstAqi = () => {
-  const vals = state.air.map((a) => a.current?.us_aqi).filter((v) => v != null);
-  return vals.length ? Math.max(...vals) : null;
+const worstTier = () => {
+  const tiers = [0, 1].map(placeAir).filter(Boolean).map((l) => l.tier);
+  return tiers.length ? Math.max(...tiers) : null;
 };
 
 function renderMask() {
   const it = state.itineraries[state.selected];
   const walkMin = it ? Math.round(walkSeconds(it) / 60) : 0;
-  const { verdict, text } = maskAdvice(worstAqi(), walkMin, $("sensitive").checked);
+  const { verdict, text } = maskAdvice(worstTier(), walkMin, $("sensitive").checked);
+  const basis = state.pm25?.some(Boolean) ? "NEA 1-hour PM2.5" : "US AQI";
   $("mask").innerHTML = `<h3>Should I wear a mask?</h3>
     <div class="mask-verdict">${verdict}</div>
     <p>${text}</p>
-    <p class="muted">Based on the worse AQI of start/destination and ${walkMin} min of walking on the selected route.</p>`;
+    <p class="muted">Based on the worse ${basis} reading of start/destination and ${walkMin} min of walking on the selected route.</p>`;
 }
 
 $("sensitive").addEventListener("change", () => state.air && renderMask());
@@ -410,14 +437,14 @@ $("plan-form").addEventListener("submit", async (e) => {
   try {
     const [from, to] = await Promise.all([resolvePlace("from"), resolvePlace("to")]);
     setStatus("Planning routes and checking air quality…");
-    const [plan, air, psi] = await Promise.all([
+    const [plan, air, pm25] = await Promise.all([
       planTrip(from, to, $("when").value),
       airQuality([from, to]).catch(() => [{}, {}]),
-      neaPsi([from, to]).catch(() => null),
+      neaPm25([from, to]).catch(() => null),
     ]);
     state.itineraries = plan.itineraries || [];
     state.air = air;
-    state.psi = psi;
+    state.pm25 = pm25;
     state.busArrivals = {};
     state.selected = 0;
 
